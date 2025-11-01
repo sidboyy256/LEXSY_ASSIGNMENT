@@ -1,0 +1,211 @@
+
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <title>Lexsy Legal Assistant</title>
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <script src="https://cdn.tailwindcss.com"></script>
+</head>
+<body class="bg-slate-50 text-slate-900">
+  <div class="max-w-5xl mx-auto p-6">
+    <header class="mb-6">
+      <h1 class="text-2xl font-bold">Lexsy Legal Assistant</h1>
+      <p class="text-sm text-slate-600">Upload a .docx, fill placeholders via chat, and download your completed document.</p>
+    </header>
+
+    <div class="mb-4 p-4 bg-white border rounded-xl" style="display: none;">
+      <div class="grid md:grid-cols-2 gap-4">
+        <div>
+          <label class="block text-sm font-medium mb-1">Backend URL</label>
+          <input id="backendUrl" type="text" class="w-full border rounded-lg px-3 py-2"
+                value="" placeholder="(auto same-origin) leave blank" />
+          <p class="text-xs text-slate-500 mt-1">Leave blank to use this server (recommended).</p>
+        </div>
+        <div class="flex items-end">
+          <button id="btnList" class="px-4 py-2 rounded-lg border">List Placeholders</button>
+        </div>
+      </div>
+    </div>
+
+    <div class="mb-4 p-4 bg-white border rounded-xl">
+      <label class="block text-sm font-medium mb-2">Upload .docx</label>
+      <input id="docFile" type="file" accept=".docx" class="block" />
+      <button id="btnUpload" class="mt-3 px-4 py-2 rounded-lg bg-slate-900 text-white hover:opacity-90">
+        Upload
+      </button>
+      <div id="uploadStatus" class="text-sm text-slate-600 mt-2"></div>
+    </div>
+
+    <div class="grid md:grid-cols-2 gap-4">
+      <div class="p-4 bg-white border rounded-xl">
+        <h2 class="font-semibold mb-2">Conversation</h2>
+        <div id="chat" class="h-80 overflow-y-auto border rounded-lg p-3 bg-slate-50 text-sm"></div>
+        <div class="mt-3 flex gap-2">
+          <input id="answerInput" type="text" class="flex-1 border rounded-lg px-3 py-2" placeholder="Type your answer…" />
+          <button id="btnSend" class="px-4 py-2 rounded-lg bg-slate-900 text-white hover:opacity-90">Send</button>
+        </div>
+      </div>
+
+      <div class="p-4 bg-white border rounded-xl">
+        <h2 class="font-semibold mb-2">Live Preview</h2>
+        <iframe id="preview" class="w-full h-80 border rounded-lg bg-white"></iframe>
+        <div class="mt-3 flex gap-2">
+          <button id="btnRefresh" class="px-4 py-2 rounded-lg border">Refresh Preview</button>
+          <a id="btnDownload" href="#" class="px-4 py-2 rounded-lg bg-slate-900 text-white hover:opacity-90">Download .docx</a>
+        </div>
+      </div>
+    </div>
+
+    <div class="mt-4 p-4 bg-white border rounded-xl">
+      <h2 class="font-semibold mb-2">Detected Placeholders</h2>
+      <div id="phList" class="text-sm text-slate-700"></div>
+    </div>
+
+    <footer class="mt-8 text-xs text-slate-500">
+      Built for Lexsy test assignment — v2 adds better blank detection & signature filling.
+    </footer>
+  </div>
+
+  <script>
+    const el = (id) => document.getElementById(id);
+    let sessionId = null;
+    let placeholders = [];
+    let answered = {};
+    let currentField = null;
+
+    function baseUrl() {
+      const user = el("backendUrl").value.trim();
+      if (user) return user.replace(/\/$/, "");
+      return `${location.protocol}//${location.host}`;
+    }
+
+    function chatMsg(sender, text) {
+      const box = el("chat");
+      const row = document.createElement("div");
+      row.className = sender === "bot" ? "mb-2" : "mb-2 text-right";
+      const bubble = document.createElement("div");
+      bubble.className = sender === "bot"
+        ? "inline-block bg-white border rounded-lg px-3 py-2"
+        : "inline-block bg-slate-900 text-white rounded-lg px-3 py-2";
+      bubble.textContent = text;
+      row.appendChild(bubble);
+      box.appendChild(row);
+      box.scrollTop = box.scrollHeight;
+    }
+
+    function renderPlaceholderList(meta) {
+      const container = el("phList");
+      if (!placeholders.length) {
+        container.textContent = "No placeholders detected yet.";
+        return;
+      }
+      const lines = placeholders.map(k => {
+        const v = answered[k];
+        return `<div class="flex justify-between gap-2 py-1 border-b last:border-0">
+          <span>${k}</span>
+          <span class="text-slate-500">${v ? "✔ " + v : "—"}</span>
+        </div>`;
+      }).join("");
+      const legend = meta ? `<div class="mt-3 text-xs text-slate-500">
+        <strong>Groups:</strong>
+        <span>named: ${meta.named_keys.length}</span> |
+        <span>underscores: ${meta.underscore_keys.length}</span> |
+        <span>signature: ${meta.signature_keys.length}</span>
+      </div>` : "";
+      container.innerHTML = lines + legend;
+    }
+
+    async function refreshPreview() {
+      if (!sessionId) return;
+      el("preview").src = `${baseUrl()}/api/preview?session_id=${encodeURIComponent(sessionId)}&t=${Date.now()}`;
+    }
+
+    function nextUnanswered() {
+      return placeholders.find(k => !(k in answered)) || null;
+    }
+
+    function askNext() {
+      currentField = nextUnanswered();
+      if (currentField) {
+        chatMsg("bot", `Please provide a value for: "${currentField}"`);
+      } else {
+        chatMsg("bot", "All placeholders filled. You can refresh preview and download the document.");
+      }
+      renderPlaceholderList();
+    }
+
+    el("btnUpload").addEventListener("click", async () => {
+      const file = el("docFile").files[0];
+      if (!file) {
+        el("uploadStatus").textContent = "Please choose a .docx file.";
+        return;
+      }
+      const fd = new FormData();
+      fd.append("file", file);
+      el("uploadStatus").textContent = "Uploading…";
+      try {
+        const res = await fetch(`${baseUrl()}/api/upload`, { method: "POST", body: fd });
+        const data = await res.json();
+        if (!res.ok) throw new Error(data.error || "Upload failed");
+
+        sessionId = data.session_id;
+        placeholders = data.placeholders || [];
+        answered = {};
+        el("uploadStatus").textContent = `Uploaded. Session: ${sessionId}`;
+        chatMsg("bot", `Detected ${placeholders.length} fields.`);
+        renderPlaceholderList(data.meta);
+        refreshPreview();
+
+        el("btnDownload").href = `${baseUrl()}/api/download?session_id=${encodeURIComponent(sessionId)}`;
+        askNext();
+      } catch (e) {
+        el("uploadStatus").textContent = "Error: " + e.message;
+      }
+    });
+
+    el("btnSend").addEventListener("click", async () => {
+      const val = el("answerInput").value.trim();
+      if (!val || !currentField || !sessionId) return;
+      chatMsg("user", val);
+      el("answerInput").value = "";
+
+      const payload = { session_id: sessionId, field: currentField, value: val };
+      try {
+        const res = await fetch(`${baseUrl()}/api/answer`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(payload)
+        });
+        const data = await res.json();
+        if (!res.ok) throw new Error(data.error || "Failed to save answer");
+
+        answered[currentField] = val;
+        renderPlaceholderList();
+        await refreshPreview();
+        if (data.next) {
+          currentField = data.next;
+          chatMsg("bot", `Thanks! Next: "${currentField}"`);
+        } else {
+          currentField = null;
+          chatMsg("bot", "Great! Everything is filled. Download when ready.");
+        }
+      } catch (e) {
+        chatMsg("bot", "Error: " + e.message);
+      }
+    });
+
+    el("btnRefresh").addEventListener("click", refreshPreview);
+    el("btnList").addEventListener("click", async () => {
+      if (!sessionId) { chatMsg("bot","Upload a document first."); return; }
+      const res = await fetch(`${baseUrl()}/api/placeholders?session_id=${encodeURIComponent(sessionId)}`);
+      const data = await res.json();
+      if (res.ok) {
+        placeholders = data.placeholders || placeholders;
+        renderPlaceholderList(data.meta);
+        chatMsg("bot", "Re-listed placeholders.");
+      }
+    });
+  </script>
+</body>
+</html>
